@@ -1,0 +1,28 @@
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# KOBRA runtime files
+kobra_memory.db
+kobra.log
+temp_audio.mp3
+*.wav
+*.mp3
+
+# Porcupine wake-word models (sensitive — keep local)
+*.ppn
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini

@@ -1,0 +1,40 @@
+# KOBRA v2 — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# Wake word detection
+pvporcupine>=3.0.0
+
+# Speech-to-text (local, CPU-efficient)
+faster-whisper>=1.0.0
+
+# LLM (Groq API)
+groq>=0.9.0
+
+# Text-to-speech (online, high quality)
+edge-tts>=6.1.0
+
+# Offline TTS fallback
+pyttsx3>=2.90
+
+# Audio I/O (pre-built Windows wheels — no C++ compiler needed)
+sounddevice>=0.4.6
+soundfile>=0.12.1
+
+# Media streaming — resolves YouTube stream URLs
+yt-dlp>=2024.1.0
+
+# Keyboard & mouse control
+pyautogui>=0.9.54
+
+# Clipboard read/write
+pyperclip>=1.9.0
+
+# Web scraping for search
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+
+# System info (CPU, RAM, battery)
+psutil>=5.9.0
+
+# Environment variable loading
+python-dotenv>=1.0.0
