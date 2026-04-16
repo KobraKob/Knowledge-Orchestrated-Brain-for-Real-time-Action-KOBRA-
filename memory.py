@@ -1,17 +1,25 @@
 """
 memory.py — Persistent SQLite storage for KOBRA.
 
-Two tables:
-  - conversations: every user/assistant turn
-  - facts: key/value store for long-term facts the LLM explicitly saves
+Two concerns:
+  - Conversation history  → managed by ConversationSummaryBuffer
+                            (rolling window + Groq-powered summarisation)
+  - Long-term facts       → plain key/value SQLite table (never summarised)
+
+ConversationSummaryBuffer keeps the last 8 turns verbatim.
+When total turns exceed 20, older turns are compressed into a rolling
+summary stored alongside the raw turns. Long sessions never blow the
+context window — recent context stays sharp, old context is summarised.
 """
 
 import sqlite3
 import logging
-from datetime import datetime
 from typing import Any
 
+from groq import Groq
+
 import config
+from conversation_memory import ConversationSummaryBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +29,11 @@ class Memory:
         self._conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._initialize_tables()
+
+        # ConversationSummaryBuffer — wraps the conversations table
+        _groq = Groq(api_key=config.GROQ_API_KEY)
+        self._csb = ConversationSummaryBuffer(self._conn, _groq)
+
         logger.info("Memory initialised — DB: %s", config.DB_PATH)
 
     # ── Schema ─────────────────────────────────────────────────────────────────
@@ -30,10 +43,11 @@ class Memory:
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS conversations (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    role      TEXT    NOT NULL,
-                    content   TEXT    NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role       TEXT    NOT NULL,
+                    content    TEXT    NOT NULL,
+                    is_summary INTEGER DEFAULT 0,
+                    timestamp  DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS facts (
@@ -45,15 +59,20 @@ class Memory:
                 """
             )
 
-    # ── Writes ─────────────────────────────────────────────────────────────────
+    # ── Conversation writes ────────────────────────────────────────────────────
 
     def save_conversation_turn(self, role: str, content: str) -> None:
-        """Append one conversation turn (role: 'user' | 'assistant')."""
-        with self._conn:
-            self._conn.execute(
-                "INSERT INTO conversations (role, content) VALUES (?, ?)",
-                (role, content),
-            )
+        """
+        Append one conversation turn and trigger summarisation if needed.
+        After every save, ConversationSummaryBuffer checks whether old turns
+        need to be compacted — completely transparent to the caller.
+        """
+        self._csb.add_turn(role, content)
+        # Summarise asynchronously — fire and forget within the same call.
+        # In practice this is fast (<1s) and only triggers every ~12 turns.
+        self._csb.maybe_summarise()
+
+    # ── Fact writes ────────────────────────────────────────────────────────────
 
     def save_fact(self, key: str, value: str) -> None:
         """Upsert a named fact into long-term storage."""
@@ -70,37 +89,40 @@ class Memory:
             )
         logger.info("Fact saved — %s: %s", key, value)
 
-    # ── Reads ──────────────────────────────────────────────────────────────────
+    # ── Conversation reads ─────────────────────────────────────────────────────
 
     def get_recent(self, limit: int = config.MEMORY_INJECT_LIMIT) -> list[dict[str, Any]]:
-        """Return the last N conversation turns, oldest-first."""
-        cur = self._conn.execute(
-            """
-            SELECT role, content, timestamp
-            FROM conversations
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        rows = cur.fetchall()
-        return [dict(r) for r in reversed(rows)]
+        """
+        Return recent raw conversation turns, oldest-first.
+        Used by brain.py to inject history into Groq messages.
+        Does NOT include the summary row — use get_context() for that.
+        """
+        return self._csb.get_recent_raw(limit=limit)
+
+    def get_context(self) -> list[dict[str, Any]]:
+        """
+        Return full context for LLM injection:
+          [summary system message (if any)] + [last 8 raw turns]
+        This is the ConversationSummaryBuffer's primary output.
+        """
+        return self._csb.get_context()
+
+    # ── Fact reads ─────────────────────────────────────────────────────────────
 
     def get_all_facts(self) -> list[dict[str, Any]]:
-        """Return all stored facts."""
+        """Return all stored long-term facts."""
         cur = self._conn.execute("SELECT key, value, timestamp FROM facts ORDER BY key")
         return [dict(r) for r in cur.fetchall()]
 
     def recall(self, query: str) -> list[dict[str, Any]]:
-        """
-        Search conversations and facts for the query string (case-insensitive LIKE).
-        Returns a list of dicts with a 'source' field indicating which table matched.
-        """
+        """Search conversations and facts for the query string."""
         like = f"%{query}%"
         results: list[dict[str, Any]] = []
 
         cur = self._conn.execute(
-            "SELECT role, content, timestamp FROM conversations WHERE content LIKE ? ORDER BY id DESC LIMIT 10",
+            """SELECT role, content, timestamp FROM conversations
+               WHERE content LIKE ? AND is_summary = 0
+               ORDER BY id DESC LIMIT 10""",
             (like,),
         )
         for row in cur.fetchall():
@@ -118,20 +140,16 @@ class Memory:
     # ── Maintenance ────────────────────────────────────────────────────────────
 
     def clear_conversations(self) -> None:
-        """Delete all conversation history (facts are preserved)."""
-        with self._conn:
-            self._conn.execute("DELETE FROM conversations")
+        """Delete all conversation history and summaries (facts preserved)."""
+        self._csb.clear()
         logger.info("Conversation history cleared.")
 
     def format_for_injection(self) -> str:
-        """
-        Build the memory context block that gets inserted into the system prompt.
-        """
+        """Build a memory context string for legacy callers."""
         lines: list[str] = ["--- MEMORY CONTEXT ---"]
-
         recent = self.get_recent()
         if recent:
-            lines.append(f"Recent conversation (last {len(recent)} turns):")
+            lines.append(f"Recent conversation ({len(recent)} turns):")
             for turn in recent:
                 lines.append(f"[{turn['role']}]: {turn['content']}")
         else:

@@ -1,40 +1,61 @@
-# KOBRA v2 — Python dependencies
+# KOBRA v4 — Python dependencies
 # Install with: pip install -r requirements.txt
+# Post-install: playwright install chromium
+# RAG setup:   ollama pull nomic-embed-text
 
-# Wake word detection
+# ── Wake word detection ───────────────────────────────────────────────────────
 pvporcupine>=3.0.0
 
-# Speech-to-text (local, CPU-efficient)
+# ── Speech-to-text (local, CPU-efficient) ────────────────────────────────────
 faster-whisper>=1.0.0
 
-# LLM (Groq API)
+# ── LLM (Groq API) ───────────────────────────────────────────────────────────
 groq>=0.9.0
 
-# Text-to-speech (online, high quality)
-edge-tts>=6.1.0
+# ── Text-to-speech ────────────────────────────────────────────────────────────
+edge-tts>=6.1.0          # default (online, no key)
+pyttsx3>=2.90             # offline fallback
+elevenlabs>=1.0.0         # optional voice cloning (USE_ELEVENLABS=True)
 
-# Offline TTS fallback
-pyttsx3>=2.90
-
-# Audio I/O (pre-built Windows wheels — no C++ compiler needed)
+# ── Audio I/O (pre-built Windows wheels — no C++ compiler needed) ─────────────
 sounddevice>=0.4.6
 soundfile>=0.12.1
 
-# Media streaming — resolves YouTube stream URLs
-yt-dlp>=2024.1.0
+# ── Media streaming ───────────────────────────────────────────────────────────
+yt-dlp>=2024.1.0          # YouTube stream URL resolver
 
-# Keyboard & mouse control
+# ── Keyboard, mouse, & screen control ────────────────────────────────────────
 pyautogui>=0.9.54
-
-# Clipboard read/write
 pyperclip>=1.9.0
+pywinauto>=0.6.8          # window snapping + focus modes (v4)
+pywin32>=306              # win32gui for foreground window detection (v4)
 
-# Web scraping for search
+# ── Web / scraping ────────────────────────────────────────────────────────────
 beautifulsoup4>=4.12.0
 requests>=2.31.0
 
-# System info (CPU, RAM, battery)
+# ── System / OS ───────────────────────────────────────────────────────────────
 psutil>=5.9.0
-
-# Environment variable loading
 python-dotenv>=1.0.0
+
+# ── Browser automation ────────────────────────────────────────────────────────
+playwright>=1.40.0        # WhatsApp Web + research agent scraping
+
+# ── External integrations ─────────────────────────────────────────────────────
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+spotipy>=2.23.0
+python-dateutil>=2.8.2
+cryptography>=41.0.0
+
+# ── Personal RAG Knowledge Base (v4) ─────────────────────────────────────────
+# Requires: ollama running + `ollama pull nomic-embed-text`
+chromadb>=0.4.0           # vector store (persistent, on-disk)
+watchdog>=3.0.0           # live file watching for re-indexing
+PyMuPDF>=1.23.0           # PDF text extraction (import as fitz)
+python-docx>=1.1.0        # .docx extraction
+tqdm>=4.66.0              # progress bars during initial indexing
+
+# ── Proactive Engine (v4) ─────────────────────────────────────────────────────
+croniter>=2.0.0           # cron-style task scheduling

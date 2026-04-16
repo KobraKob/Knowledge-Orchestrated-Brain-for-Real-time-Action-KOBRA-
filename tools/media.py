@@ -11,7 +11,7 @@ import logging
 import subprocess
 import threading
 import webbrowser
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,29 @@ def play_youtube(query: str) -> str:
     url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
     webbrowser.open(url)
     return f"Opened YouTube for '{query}'."
+
+
+def play_on_spotify(query: str) -> str:
+    """
+    Search and play a song/artist/playlist on the Spotify desktop app.
+    Opens Spotify and performs a search so sir can click play,
+    or if Spotify is already open, directly searches within it.
+    """
+    logger.info("[TOOL] play_on_spotify: %r", query)
+    # Use Spotify's URI scheme to search directly within the desktop app
+    import subprocess
+    import os
+    search_uri = f"spotify:search:{quote(query, safe='')}"
+    try:
+        os.startfile(search_uri)
+        return f"Opened Spotify search for '{query}', sir."
+    except Exception:
+        pass
+
+    # Fallback: open Spotify web player search
+    url = f"https://open.spotify.com/search/{quote(query, safe='')}"
+    webbrowser.open(url)
+    return f"Opened Spotify web for '{query}', sir."
 
 
 # ── Internal ───────────────────────────────────────────────────────────────────

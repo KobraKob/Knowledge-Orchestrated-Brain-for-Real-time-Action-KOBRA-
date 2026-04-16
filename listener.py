@@ -85,6 +85,18 @@ class Listener:
                     logger.info("Wake word detected.")
                     return
 
+    # ── Foreground app detection ───────────────────────────────────────────────
+
+    @property
+    def foreground_app(self) -> str:
+        """Return the title of the current foreground window (best effort)."""
+        try:
+            import win32gui
+            hwnd = win32gui.GetForegroundWindow()
+            return win32gui.GetWindowText(hwnd)
+        except Exception:
+            return ""
+
     # ── Speech capture ─────────────────────────────────────────────────────────
 
     def capture_speech(self) -> str:
@@ -146,6 +158,16 @@ class Listener:
                 tmp_path,
                 language="en",
                 beam_size=5,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 400},
+                initial_prompt=(
+                    "The user is giving voice commands to KOBRA, an AI assistant. "
+                    "Commands include: open apps, play music, search the web, create files, "
+                    "check system info, install software, control volume."
+                ),
+                condition_on_previous_text=False,
+                no_speech_threshold=0.55,
+                compression_ratio_threshold=2.4,
             )
             text = " ".join(seg.text for seg in segments).strip()
             logger.info("Transcribed: %r", text)
