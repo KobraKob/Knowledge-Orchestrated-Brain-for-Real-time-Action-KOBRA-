@@ -12,6 +12,7 @@ Contact resolution errors prompt KOBRA to ask the user for the missing info.
 """
 
 import logging
+import re
 
 import config
 from agents.base_agent import BaseAgent
@@ -123,7 +124,8 @@ RULES:
         t = instruction.lower()
         base = ["speak_only"]
 
-        if any(w in t for w in ("email", "gmail", "send mail", "inbox", "unread")):
+        if any(w in t for w in ("email", "gmail", "send mail", "inbox", "unread")) or \
+           re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', t):
             return base + ["send_email", "read_emails", "save_contact"]
 
         if any(w in t for w in ("calendar", "meeting", "event", "schedule",

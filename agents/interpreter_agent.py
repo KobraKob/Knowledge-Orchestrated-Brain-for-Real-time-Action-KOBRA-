@@ -345,6 +345,23 @@ class InterpreterAgent(BaseAgent):
         Execute code in a subprocess. Detects language (Python vs PowerShell).
         Returns dict: {success, stdout, stderr, returncode, lang}
         """
+        # ── Guardrail check before any execution ─────────────────────────────
+        try:
+            from guardrails import Guardrails
+            _gr = Guardrails()
+            gr_result = _gr.check_code(code)
+            if not gr_result.allowed:
+                logger.warning("[INTERPRETER] Guardrail blocked code execution: %s", gr_result.reason)
+                return {
+                    "success": False,
+                    "stdout": "",
+                    "stderr": f"Guardrail blocked: {gr_result.reason}",
+                    "returncode": -1,
+                    "lang": "unknown",
+                }
+        except ImportError:
+            pass
+
         lang = _detect_language(code)
 
         with tempfile.NamedTemporaryFile(

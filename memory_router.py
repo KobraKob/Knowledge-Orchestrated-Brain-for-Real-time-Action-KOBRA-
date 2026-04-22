@@ -162,10 +162,41 @@ class MemoryRouter:
     # ── Private retrieval methods ─────────────────────────────────────────────
 
     def _get_semantic(self, query: str) -> str:
+        """
+        Read semantic facts from BOTH sources:
+          1. kobra_learning.db.semantic_memory  — via learning.get_semantic_context()
+          2. kobra_memory.db.facts              — via memory.get_all_facts()
+        This bridges the two-DB gap: save_memory writes to DB1 (facts table)
+        but was previously only read from DB2 (semantic_memory table).
+        """
+        parts = []
+
+        # Source 1: learning system semantic store
         try:
-            return self._learning.get_semantic_context()
+            s = self._learning.get_semantic_context()
+            if s and s.strip():
+                parts.append(s.strip())
         except Exception:
-            return ""
+            pass
+
+        # Source 2: memory.py facts table (primary save_memory destination)
+        try:
+            facts = self._conv.get_all_facts()
+            if facts:
+                lines = ["What you know about sir:"]
+                for f in facts[:12]:
+                    key = f.get("key", "")
+                    val = f.get("value", "")
+                    # Skip duplicates already in learning context
+                    line = f"  {key}: {val}"
+                    if line not in (parts[0] if parts else ""):
+                        lines.append(line)
+                if len(lines) > 1:
+                    parts.append("\n".join(lines))
+        except Exception:
+            pass
+
+        return "\n\n".join(parts) if parts else ""
 
     def _get_episodic(self, query: str) -> str:
         try:

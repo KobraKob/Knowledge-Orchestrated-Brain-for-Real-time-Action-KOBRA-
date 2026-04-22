@@ -13,12 +13,45 @@ Complexity triggers (any one → planning pass):
   - Long transcript (> 15 words)
 """
 
+import json
 import logging
 import re
 import threading
 from groq import Groq
 
 import config
+
+try:
+    from metacognition import MetacognitiveScorer
+    _metacog = MetacognitiveScorer()
+    _METACOG_AVAILABLE = True
+except ImportError:
+    _METACOG_AVAILABLE = False
+
+# ── Tool execution cost estimates (milliseconds, p50) ─────────────────────────
+# Used by planner to optimize execution order and set user expectations.
+_TOOL_COSTS: dict[str, int] = {
+    "conversation":  50,
+    "memory":        50,
+    "system":        200,
+    "dev":           500,
+    "screen":        600,
+    "knowledge":     800,
+    "web":           1500,
+    "media":         1500,
+    "integration":   2000,
+    "browser":       4000,
+    "mcp":           3000,
+    "research":      15000,
+    "interpreter":   20000,
+}
+
+
+def get_estimated_duration(agents: list[str]) -> int:
+    """Estimate wall-clock ms for a set of agents running in parallel (max cost)."""
+    if not agents:
+        return 0
+    return max(_TOOL_COSTS.get(a, 2000) for a in agents)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +82,7 @@ Return ONLY valid JSON. No markdown, no explanation.
 
 # Patterns that indicate a complex command worth planning
 _MULTI_GOAL = re.compile(
-    r"\b(and also|and then|after that|then|additionally|as well|plus|also)\b",
+    r"\b(and also|and then|after that|then|additionally|as well|plus|also| then | after that | and send| and email| and save| and create)\b",
     re.IGNORECASE,
 )
 _HELP_PATTERNS = (
@@ -61,7 +94,11 @@ _TIME_PATTERNS = (
     "tomorrow", "next week", "this week", "tonight", "this month",
     "by friday", "by monday", "schedule", "deadline",
 )
-_AMBIGUOUS_PATTERNS = ("that", "it", "the one", "the thing", "the first", "the second", "those")
+_AMBIGUOUS_PATTERNS = (
+    "that", "it", "the one", "the thing", "the first", "the second", "those",
+    "the results", "the list", "this", "where", "what about", "show me",
+    "and the", "what happened",
+)
 
 
 class NeuralPlanner:
@@ -83,6 +120,19 @@ class NeuralPlanner:
 
         # Multi-goal signals
         if _MULTI_GOAL.search(t):
+            return True
+
+        # Search + action patterns (search then email/create/save)
+        _SEARCH_ACTION_PATTERNS = (
+            "search", "look up", "find", "get ", "list ", "what are", "who are",
+        )
+        _ACTION_PATTERNS = (
+            "send email", "email to", "send mail", "save ", "create ", "write ",
+            "make ", "add to", "update ", "share ", "post ",
+        )
+        has_search = any(p in t for p in _SEARCH_ACTION_PATTERNS)
+        has_action = any(p in t for p in _ACTION_PATTERNS)
+        if has_search and has_action and (" and " in t or "then" in t):
             return True
 
         # Help/advice patterns
@@ -136,10 +186,19 @@ class NeuralPlanner:
             if "enriched_transcript" not in plan:
                 plan["enriched_transcript"] = transcript
 
+            # Attach cost estimate if LLM didn't provide one
+            if "estimated_duration_ms" not in plan:
+                agents_mentioned = [
+                    g for g in plan.get("goals", [])
+                    if any(a in g.lower() for a in _TOOL_COSTS)
+                ]
+                plan["estimated_duration_ms"] = get_estimated_duration(agents_mentioned) or 500
+
             logger.info(
-                "[PLANNER] complexity=%s | intent=%s",
+                "[PLANNER] complexity=%s | intent=%s | ~%dms",
                 plan.get("complexity", "?"),
                 plan.get("intent", "?")[:80],
+                plan.get("estimated_duration_ms", 0),
             )
             return plan
 
@@ -159,3 +218,24 @@ class NeuralPlanner:
         logger.info("[PLANNER] Complex command detected — running planning pass.")
         plan = self.plan(transcript, recent_context)
         return plan.get("enriched_transcript", transcript)
+
+    def assess_tasks(self, tasks: list, context: str = "") -> tuple[list, str | None]:
+        """
+        Run metacognitive assessment on planned tasks.
+        Returns (tasks, clarification_question_or_None).
+        Low-confidence steps get a clarification question BEFORE execution.
+        """
+        if not _METACOG_AVAILABLE or not tasks:
+            return tasks, None
+        try:
+            scores = _metacog.score_tasks(tasks, context)
+            _metacog.summary_log(scores)
+            clarification = _metacog.get_clarification_prompt(scores)
+            return tasks, clarification
+        except Exception as exc:
+            logger.debug("[PLANNER] assess_tasks failed: %s", exc)
+            return tasks, None
+
+    def estimate_duration(self, agent_names: list[str]) -> int:
+        """Return estimated wall-clock ms for a set of agents."""
+        return get_estimated_duration(agent_names)

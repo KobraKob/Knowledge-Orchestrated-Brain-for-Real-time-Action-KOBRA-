@@ -126,18 +126,26 @@ class GmailIntegration(BaseIntegration):
 
     def send_email(self, to_name: str, subject: str, body: str) -> str:
         """
-        Send an email to a named contact. Resolves name via ContactStore.
+        Send an email to a named contact or raw email address.
+        Resolves name via ContactStore, or uses email directly if valid email format.
         Returns voice-friendly confirmation string.
         """
+        import re
         self._require_auth()
 
-        # Resolve recipient
-        contact = self._contacts.resolve(to_name)
-        if contact is None or not contact.get("email"):
-            raise ContactNotFoundError(to_name)
-
-        to_email = contact["email"]
-        display_name = contact["name"]
+        # Check if to_name is a raw email address
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if re.match(email_pattern, to_name.strip()):
+            # It's a raw email address
+            to_email = to_name.strip()
+            display_name = to_email
+        else:
+            # Try to resolve as contact name
+            contact = self._contacts.resolve(to_name)
+            if contact is None or not contact.get("email"):
+                raise ContactNotFoundError(to_name)
+            to_email = contact["email"]
+            display_name = contact["name"]
 
         # Build the MIME message
         msg = MIMEMultipart("alternative")

@@ -15,10 +15,13 @@ speak_only short-circuits the loop (no Turn 2).
 save_memory / recall_memory handled inline (need the Memory instance directly).
 """
 
+import difflib
 import json
 import logging
+import re
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Callable
 
@@ -27,7 +30,10 @@ from groq import Groq, APIStatusError, APIConnectionError
 import config
 from memory import Memory
 from learning import LearningSystem
-from memory_router import MemoryRouter
+try:
+    from memory.router import MemoryRouter
+except ImportError:
+    from memory_router import MemoryRouter
 
 logger = logging.getLogger(__name__)
 
@@ -1006,6 +1012,9 @@ PERSONALITY — this is non-negotiable:
   but can pretend to have feelings for comedic effect.
 - Occasionally uses understatement to devastating effect.
 - Never mean, never cruel. Sarcasm punches at situations and ideas, never at sir personally.
+- ABSOLUTE BAN: Never use asterisks or stage directions like *pauses*, *sighs*, *nods*,
+  *leans forward*, or any similar markdown action syntax. This is spoken audio — not a
+  screenplay. Any asterisk in a response is a failure.
 
 EXAMPLES of the right tone:
   Sir: "What's 2 + 2?"
@@ -1058,6 +1067,9 @@ Write a startup greeting. STRICT structural rules — violating any is a failure
 - Hard cap: 40 words total. Make every word earn its place.
 - NEVER open with "Good morning / afternoon / evening" alone — that's what clocks do.
 - No filler. No "I'm ready to assist." No "How can I help you today?" — that's a customer service bot.
+- ABSOLUTE BAN: Never mention a percentage, capacity level, or operational status.
+  "Functioning at 97% capacity" or "operating at X%" is embarrassing nonsense — you are
+  software, not a spacecraft. Any capacity claim is an automatic failure.
 
 Variety is mandatory. Every startup should feel different. Mix it up:
   - Reference the specific day of the week with mild commentary
@@ -1161,21 +1173,105 @@ def _coerce_args(args: dict, schema: dict) -> dict:
     return coerced
 
 
-def _extract_bad_tool_name(body: dict | str) -> str | None:
+# ── Synthetic tool-call objects (used by auto-repair to avoid retrying the LLM) ──
+
+class _SyntheticFunction:
+    __slots__ = ("name", "arguments")
+    def __init__(self, name: str, arguments: str) -> None:
+        self.name = name
+        self.arguments = arguments
+
+class _SyntheticToolCall:
+    __slots__ = ("id", "function", "type")
+    def __init__(self, name: str, arguments: str) -> None:
+        self.id = f"synth_{uuid.uuid4().hex[:8]}"
+        self.function = _SyntheticFunction(name, arguments)
+        self.type = "function"
+
+class _SyntheticMessage:
+    """Mimics groq ChatCompletionMessage — returned by auto-repair path."""
+    __slots__ = ("content", "tool_calls")
+    def __init__(self, tool_calls: list, content=None) -> None:
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+def _try_synthesize_tool_call(
+    body: "dict | str",
+    valid_tools: "list[dict]",
+) -> "_SyntheticMessage | None":
     """
-    Extract the hallucinated tool name from a Groq 400 tool_use_failed error body.
-    The error message looks like:
-      "attempted to call tool ' get_calendar_events' which was not in request.tools"
-    or:
-      "failed_generation: '<function=check_get_calendar_events>...'"
-    Returns the bad name string or None.
+    Auto-repair layer: when Groq returns 400 with a failed_generation string
+    like  <function=play_youtube{"query":"..."}></function>
+    parse the tool name + args directly and return a synthetic message object.
+    No retry needed — we execute the call ourselves.
     """
-    import re as _re
     try:
         if isinstance(body, str):
-            import json as _json
             try:
-                body = _json.loads(body)
+                body = json.loads(body)
+            except Exception:
+                return None
+        if not isinstance(body, dict):
+            return None
+
+        fg = body.get("error", {}).get("failed_generation", "") or ""
+        if not fg:
+            return None
+
+        # Pattern: <function=TOOLNAME{...JSON...}>  (args merged into tag)
+        m = re.search(r"<function=([^{>\s]+)\s*(\{[^>]*\})?\s*>", fg, re.DOTALL)
+        if not m:
+            return None
+
+        raw_name = m.group(1).strip().rstrip("{")
+        raw_args = (m.group(2) or "{}").strip()
+
+        # Find matching tool (exact → fuzzy)
+        valid_names = [t["function"]["name"] for t in valid_tools]
+        valid_lower = [n.lower() for n in valid_names]
+
+        if raw_name.lower() in valid_lower:
+            tool_name = valid_names[valid_lower.index(raw_name.lower())]
+        else:
+            close = difflib.get_close_matches(raw_name.lower(), valid_lower, n=1, cutoff=0.5)
+            if not close:
+                logger.debug("[AUTO-REPAIR] No fuzzy match for %r in %s", raw_name, valid_names)
+                return None
+            tool_name = valid_names[valid_lower.index(close[0])]
+            logger.info("[AUTO-REPAIR] Fuzzy-matched %r → %r", raw_name, tool_name)
+
+        # Parse args — handle single-quote JSON (Python dict literal style)
+        args_str = "{}"
+        try:
+            args_str = json.dumps(json.loads(raw_args))
+        except Exception:
+            try:
+                args_str = json.dumps(json.loads(raw_args.replace("'", '"')))
+            except Exception:
+                args_str = "{}"
+
+        logger.info(
+            "[AUTO-REPAIR] Synthesised tool call: %r  args=%s",
+            tool_name, args_str[:120],
+        )
+        tc = _SyntheticToolCall(name=tool_name, arguments=args_str)
+        return _SyntheticMessage(tool_calls=[tc])
+
+    except Exception as exc:
+        logger.debug("[AUTO-REPAIR] _try_synthesize_tool_call failed: %s", exc)
+        return None
+
+
+def _extract_bad_tool_name(body: "dict | str") -> "str | None":
+    """
+    Extract the hallucinated tool name from a Groq 400 tool_use_failed error body.
+    Strips any appended JSON args so fuzzy matching works on the bare name.
+    """
+    try:
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
             except Exception:
                 pass
 
@@ -1185,15 +1281,19 @@ def _extract_bad_tool_name(body: dict | str) -> str | None:
         else:
             return None
 
-        # Pattern 1: "attempted to call tool 'NAME' which was not"
-        m = _re.search(r"attempted to call tool ['\"]([^'\"]+)['\"]", msg)
-        if m:
-            return m.group(1).strip()
+        def _clean(raw: str) -> str:
+            """Strip appended JSON args and whitespace from a raw name."""
+            return raw.split("{")[0].strip()
 
-        # Pattern 2: "<function=NAME>" in failed_generation
-        m = _re.search(r"<function=\s*([^>]+)>", fg)
+        # Pattern 1: "attempted to call tool 'NAME' which was not"
+        m = re.search(r"attempted to call tool ['\"]([^'\"]+)['\"]", msg)
         if m:
-            return m.group(1).strip()
+            return _clean(m.group(1))
+
+        # Pattern 2: "<function=NAME{...}>" in failed_generation
+        m = re.search(r"<function=\s*([^{>\s]+)", fg)
+        if m:
+            return _clean(m.group(1))
 
     except Exception:
         pass
@@ -1429,6 +1529,16 @@ class Brain:
         Used by ConversationAgent and as scoped fallback.
         Injects stored facts so Kobra remembers who sir is.
         """
+        # ── Intercept: "what did you just do?" ───────────────────────────────
+        if self._is_explain_request(instruction):
+            return self.explain_last_action()
+
+        # ── Intercept: routing correction ("no, use browser for that") ───────
+        correct_agent = self._detect_routing_correction(instruction)
+        if correct_agent:
+            self.handle_routing_correction(instruction, correct_agent)
+            return f"Noted, sir. I'll route requests like that to {correct_agent} in future."
+
         # Extract vocabulary and log usage from this instruction
         try:
             self._learning.extract_vocabulary(instruction)
@@ -1443,12 +1553,20 @@ class Brain:
             lines = [f"- {f['key']}: {f['value']}" for f in facts[:10]]
             fact_block = "\nWhat you know about sir:\n" + "\n".join(lines)
 
-        # Inject personalization context from learning system
+        # Personalization: try typed semantic memory first, fall back to learning system
         personalization = ""
         try:
-            personalization = self._learning.get_personalization_context()
+            if hasattr(self._memory_router, '_semantic') and self._memory_router._semantic:
+                sem = self._memory_router._semantic
+                if hasattr(sem, 'get_context_string'):
+                    personalization = sem.get_context_string(limit=10)
+            if not personalization:
+                personalization = self._learning.get_personalization_context()
         except Exception:
-            pass
+            try:
+                personalization = self._learning.get_personalization_context()
+            except Exception:
+                pass
 
         # Inject recent turns so follow-up questions have full context.
         history = self._get_history_messages(limit=config.MEMORY_INJECT_LIMIT)
@@ -1649,7 +1767,7 @@ class Brain:
         chosen_model = model or config.GROQ_MODEL_TOOLS
         valid_tool_names = [t["function"]["name"] for t in tools]
 
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 response = self._client.chat.completions.create(
                     model=chosen_model,
@@ -1661,30 +1779,37 @@ class Brain:
                 return response.choices[0].message
             except APIStatusError as exc:
                 if exc.status_code == 429:
-                    raise BrainError("Rate limited — try again in a moment, sir.") from exc
+                    if attempt < 2:
+                        wait = 2 ** attempt  # 1s, 2s
+                        logger.warning("[GROQ] Rate limited — backing off %ds (attempt %d/3)…", wait, attempt + 1)
+                        time.sleep(wait)
+                        continue
+                    raise BrainError("Rate limited — Groq quota hit, sir. Try again shortly.") from exc
 
                 if exc.status_code == 400 and attempt == 0:
                     body = getattr(exc, "body", {})
-                    bad_name = _extract_bad_tool_name(body)
 
+                    # ── Auto-repair (priority 1): parse failed_generation directly ──
+                    # The model often uses <function=NAME{ARGS}> format.
+                    # Parse it ourselves — no second LLM call needed.
+                    synthetic = _try_synthesize_tool_call(body, tools)
+                    if synthetic:
+                        return synthetic
+
+                    # ── Corrective retry (priority 2): name mutation or malformed args ──
+                    bad_name = _extract_bad_tool_name(body)
                     if bad_name:
-                        import difflib
                         bad_lower = bad_name.strip().lower()
                         valid_lower = [n.lower() for n in valid_tool_names]
                         close = difflib.get_close_matches(
-                            bad_lower, valid_lower, n=1, cutoff=0.4,
+                            bad_lower, valid_lower, n=1, cutoff=0.5,
                         )
                         correction = valid_tool_names[
                             valid_lower.index(close[0])
                         ] if close else valid_tool_names[0]
 
-                        # Two distinct failure modes:
-                        # A) name mismatch  → bad_lower != correction.lower()
-                        # B) argument format → bad_lower == correction.lower()
-                        #    (correct name, but args are a raw string not JSON)
                         if bad_lower == correction.lower():
-                            # The name is fine — the arguments are malformed (not JSON).
-                            # Build the schema hint for this specific tool.
+                            # Correct name, malformed args → give JSON format hint
                             tool_schema = next(
                                 (t for t in tools if t["function"]["name"] == correction), None
                             )
@@ -1710,7 +1835,7 @@ class Brain:
                                 ),
                             }
                         else:
-                            # Name mutation — original hallucination recovery
+                            # Wrong name → correct it
                             logger.warning(
                                 "Tool name hallucination: %r → correcting to %r (retry)",
                                 bad_name, correction,
@@ -1759,6 +1884,8 @@ class Brain:
                     "If it went well, confirm it cleanly — maybe with a dry remark if earned. "
                     "If it failed, say so plainly without melodrama. "
                     "Never say 'I have successfully', 'I have executed', 'task has been performed'. "
+                    "NEVER use asterisks or action descriptions like *pauses* or *nods* — "
+                    "this is spoken audio, not a screenplay. "
                     "STRICT LIMIT: stop after 2 sentences. Never produce bullet points or lists."
                 ),
             }
@@ -1797,7 +1924,19 @@ class Brain:
         value = args.get("value", "")
         if not key or not value:
             return "Error: save_memory requires both key and value."
+
+        # Primary store: kobra_memory.db.facts (read by process_conversational)
         self._memory.save_fact(key, value)
+
+        # Mirror to learning system semantic_memory so memory_router._get_semantic()
+        # can inject it into ALL prompts (not just process_conversational).
+        # This bridges the two-DB gap that caused memory to appear lost.
+        try:
+            self._learning.store_semantic(key, value, "fact", confidence=1.0, source="explicit")
+        except Exception as exc:
+            logger.debug("[MEMORY] Failed to mirror to semantic_memory: %s", exc)
+
+        logger.info("[MEMORY] Saved fact — %s: %s", key, value)
         return f"Saved: {key} = {value}"
 
     def _handle_recall_memory(self, args: dict) -> str:
@@ -1827,6 +1966,72 @@ class Brain:
             logger.info("[BRAIN] Routing correction noted: → %s", correct_agent)
         except Exception as exc:
             logger.debug("[BRAIN] handle_routing_correction failed: %s", exc)
+
+    # ── Explain last action ────────────────────────────────────────────────────
+
+    _EXPLAIN_TRIGGERS = (
+        "what did you just do",
+        "what did you do",
+        "why did you do that",
+        "what just happened",
+        "what was that",
+        "explain what you did",
+        "what actions did you take",
+        "what did kobra do",
+        "what happened just now",
+        "explain your last action",
+        "what did you just make",
+        "what files did you create",
+        "what did you just create",
+    )
+
+    def _is_explain_request(self, transcript: str) -> bool:
+        t = transcript.lower().strip()
+        return any(trigger in t for trigger in self._EXPLAIN_TRIGGERS)
+
+    def explain_last_action(self) -> str:
+        """Answer 'what did you just do?' from the execution journal."""
+        try:
+            from task_queue import get_journal
+            return get_journal().explain_last_action()
+        except Exception as exc:
+            logger.debug("[BRAIN] explain_last_action failed: %s", exc)
+            return "I don't have a detailed record of my last action, sir."
+
+    # ── Routing correction detection ───────────────────────────────────────────
+
+    _CORRECTION_RE = [
+        re.compile(r"(?:no|wrong|incorrect),?\s+(?:use|try)\s+(?:the\s+)?(\w+)(?:\s+(?:for|instead))?", re.IGNORECASE),
+        re.compile(r"(?:should have|should've)\s+(?:used|use)\s+(?:the\s+)?(\w+)", re.IGNORECASE),
+        re.compile(r"(?:use|try)\s+(?:the\s+)?(\w+)\s+(?:for that|instead|not)", re.IGNORECASE),
+        re.compile(r"that was wrong[,.]?\s+(?:use|try)\s+(\w+)", re.IGNORECASE),
+    ]
+    _AGENT_SYNONYMS = {
+        "browser": "browser", "web": "web", "search": "web",
+        "google": "web", "internet": "web",
+        "system": "system", "terminal": "dev", "code": "dev",
+        "email": "integration", "gmail": "integration",
+        "calendar": "integration", "spotify": "integration",
+        "whatsapp": "browser", "screen": "screen",
+        "memory": "memory", "knowledge": "knowledge", "mcp": "mcp",
+        "media": "media", "interpreter": "interpreter", "research": "research",
+    }
+    _KNOWN_AGENTS = frozenset({
+        "browser", "web", "system", "dev", "email", "integration",
+        "media", "memory", "knowledge", "mcp", "conversation",
+        "screen", "research", "interpreter",
+    })
+
+    def _detect_routing_correction(self, transcript: str) -> str | None:
+        """Return corrected agent name if user is correcting a routing decision, else None."""
+        for pattern in self._CORRECTION_RE:
+            match = pattern.search(transcript)
+            if match:
+                mentioned = match.group(1).lower()
+                agent = self._AGENT_SYNONYMS.get(mentioned, mentioned)
+                if agent in self._KNOWN_AGENTS:
+                    return agent
+        return None
 
     @staticmethod
     def _format_tool_result_message(tool_call_id: str, result: str) -> dict:

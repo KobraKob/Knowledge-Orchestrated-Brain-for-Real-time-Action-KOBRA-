@@ -28,6 +28,24 @@ from synthesizer import Synthesizer
 from planner import NeuralPlanner
 from routing_memory import RoutingMemory
 
+try:
+    from guardrails import Guardrails
+    _GUARDRAILS_AVAILABLE = True
+except ImportError:
+    _GUARDRAILS_AVAILABLE = False
+
+try:
+    from metacognition import MetacognitiveScorer
+    _METACOG_AVAILABLE = True
+except ImportError:
+    _METACOG_AVAILABLE = False
+
+try:
+    from task_queue import get_journal
+    _JOURNAL_AVAILABLE = True
+except ImportError:
+    _JOURNAL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # ── Decomposition prompt ───────────────────────────────────────────────────────
@@ -70,6 +88,23 @@ CRITICAL DECOMPOSITION RULES:
 - NEVER split a single intent into multiple tasks. "Play Eminem" = 1 task (media).
   "Help me plan a workout" = 1 task (conversation). "What's the weather" = 1 task (web).
 - Only create multiple tasks when the user literally asks for multiple distinct things.
+
+SEARCH + ACTION WORKFLOWS (CRITICAL):
+When the user asks to search/find/look up information AND then send/email/save/create something:
+- ALWAYS create TWO tasks with a DEPENDENCY
+- Task 1: Search for the information (web agent) → can_parallelize: false
+- Task 2: Send/email/save the results (integration/dev agent) → can_parallelize: false, depends_on: ["t1"]
+- Task 2's instruction must explicitly reference receiving the search results from Task 1
+
+Examples:
+  "search top songs and email to john"
+    → t1: web agent "Search web for top trending songs of 2026 and return formatted list"
+    → t2: integration agent "Send email to john with subject 'Top Songs 2026' containing the song list from the search results" depends_on: ["t1"]
+
+  "find weather and send to mom"
+    → t1: web agent "Get current weather forecast"
+    → t2: integration agent "Send email to mom with the weather information" depends_on: ["t1"]
+
 - "can_parallelize": true means this task does NOT depend on another task's output.
 - "depends_on": list of task IDs that must finish before this task starts.
 - Keep each "instruction" self-contained — the agent only sees its own instruction.
@@ -97,6 +132,20 @@ FOLLOW-UP RULE:
 - If the command is a follow-up (uses "that", "it", "the first one", "tell me more",
   "which one", "explain", etc.), resolve the reference using the recent conversation context
   and write a fully explicit instruction.
+
+SEARCH-THEN-ACT CHAINING RULE (CRITICAL):
+- When the user wants to FIRST fetch/search data and THEN do something with the result
+  (email it, save it to a file, send it, post it), create 2 tasks with depends_on.
+  Examples:
+    "find top trending songs and email them to x@y.com"
+      → t1: web agent — "Search the web for top trending songs of 2026. Return a clean numbered list."
+             can_parallelize: true, depends_on: []
+      → t2: integration agent — "Send an email to x@y.com. The email subject should be 'Top Trending Songs 2026'. The body should contain the list of songs provided in the context from the previous step."
+             can_parallelize: false, depends_on: ["t1"]
+    "look up [X] and save it to a file" → t1: web, t2: dev (depends_on t1)
+    "research [X] and write a summary" → t1: research/web, t2: dev (depends_on t1)
+- ONLY set depends_on when t2 genuinely NEEDS t1's output data.
+- For independent parallel actions ("play music AND open Chrome"), use can_parallelize: true on both with no depends_on.
 
 CALENDAR RULE:
 - "Do I have meetings today or tomorrow?" = ONE task to integration agent.
@@ -145,7 +194,14 @@ class Orchestrator:
         self._synthesizer = Synthesizer(brain)
         self._planner = NeuralPlanner()
         self._routing_memory = RoutingMemory()
-        logger.info("Neural Planner + Routing Memory initialized.")
+        self._guardrails = Guardrails() if _GUARDRAILS_AVAILABLE else None
+        self._metacog = MetacognitiveScorer() if _METACOG_AVAILABLE else None
+        # Wire routing memory into brain's memory router for few-shot context
+        try:
+            self._brain.set_routing_memory(self._routing_memory)
+        except Exception:
+            pass
+        logger.info("Neural Planner + Routing Memory + Guardrails + Metacognition initialized.")
         logger.info("Orchestrator ready — %d agents registered: %s",
                     len(self._agents), sorted(self._agents.keys()))
 
@@ -174,12 +230,70 @@ class Orchestrator:
         logger.info("[ORCHESTRATOR] %d task(s): %s",
                     len(tasks), [f"{t.id}→{t.agent_name}" for t in tasks])
 
+        # Step 4: Guardrail check — block destructive/injected instructions
+        if self._guardrails:
+            for task in tasks:
+                gr = self._guardrails.check_instruction(task.instruction)
+                if not gr.allowed:
+                    if _JOURNAL_AVAILABLE:
+                        get_journal().log_guardrail_block(gr.rule, transcript, gr.reason)
+                    logger.warning("[ORCHESTRATOR] Guardrail blocked task %s: %s", task.id, gr.reason)
+                    return self._guardrails.describe_block(gr)
+
+        # Step 4b: Confirmation guard — irreversible actions need explicit user sign-off
+        # If the user's transcript IS itself a confirmation ("yes", "go ahead", "confirm",
+        # "do it", "send it") and there are pending confirmations, approve and re-run.
+        if self._guardrails:
+            _CONFIRM_WORDS = {"yes", "yeah", "yep", "go ahead", "confirm", "do it",
+                              "send it", "sure", "affirmative", "proceed", "ok", "okay"}
+            _is_confirm = transcript.lower().strip().rstrip(".,!") in _CONFIRM_WORDS or \
+                          any(w in transcript.lower() for w in ("yes do it", "yes send", "go ahead", "confirmed"))
+
+            for task in tasks:
+                question = self._guardrails.needs_confirmation(task.agent_name, task.instruction)
+                if question:
+                    if _is_confirm:
+                        # User already said yes — mark confirmed and proceed
+                        self._guardrails.confirm_pending(task.agent_name, task.instruction)
+                        logger.info("[ORCHESTRATOR] Confirmation received for task %s.", task.id)
+                    else:
+                        # Ask the user first — store pending context so next turn can resolve
+                        logger.info("[ORCHESTRATOR] Confirmation required for task %s: %s",
+                                    task.id, question)
+                        return question
+
+        # Step 5: Metacognitive pre-flight — check confidence, ask clarification if needed
+        if self._metacog and len(tasks) > 0:
+            scores = self._metacog.score_tasks(tasks, recent_ctx)
+            self._metacog.summary_log(scores)
+            clarification = self._metacog.get_clarification_prompt(scores)
+            if clarification:
+                logger.info("[ORCHESTRATOR] Metacog: clarification needed.")
+                if _JOURNAL_AVAILABLE:
+                    get_journal().log_metacognition(
+                        tasks[0].id,
+                        min(s.confidence for s in scores),
+                        [s.clarification_question for s in scores if s.clarification_needed],
+                    )
+                return clarification
+
+        # Step 6: Journal the command
+        if _JOURNAL_AVAILABLE:
+            get_journal().log_command(transcript, enriched, len(tasks))
+
         # Fast path A: single conversational task
         if len(tasks) == 1 and tasks[0].agent_name == "conversation":
             if abort_flag.is_set():
                 return "Understood, sir."
             result = self._brain.process_conversational(tasks[0].instruction)
             self._routing_memory.log_routing(transcript, "conversation", tasks[0].instruction)
+            # Store episode in memory router
+            try:
+                self._brain._memory_router.store_episode_from_result(
+                    transcript, "conversation", result, True
+                )
+            except Exception:
+                pass
             return result
 
         # Fast path B: single non-conversational task (skip queue overhead)
@@ -191,6 +305,12 @@ class Orchestrator:
                 self._routing_memory.log_routing(
                     transcript, tasks[0].agent_name, tasks[0].instruction, outcome
                 )
+                try:
+                    self._brain._memory_router.store_episode_from_result(
+                        transcript, tasks[0].agent_name, result.output or "", result.success
+                    )
+                except Exception:
+                    pass
                 return self._synthesizer.synthesize(transcript, [result])
 
         # Standard path: multi-task orchestration
@@ -200,6 +320,12 @@ class Orchestrator:
             self._routing_memory.log_routing(
                 transcript, result.agent_name, "", outcome
             )
+            try:
+                self._brain._memory_router.store_episode_from_result(
+                    transcript, result.agent_name, result.output or "", result.success
+                )
+            except Exception:
+                pass
         return self._synthesizer.synthesize(transcript, results)
 
     # ── Decomposition ──────────────────────────────────────────────────────────
@@ -328,5 +454,61 @@ class Orchestrator:
                 can_parallelize=False,
                 depends_on=[],
             )]
+
+        # ── Search + Email workflow: search then send email with results ─────────
+        _SEARCH_PATTERNS = ("search ", "look up ", "find ", "get ", "list ", "what are ", "top ", "trending ")
+        _EMAIL_PATTERNS = ("send email", "email to", "send mail", "mail to", "email ")
+
+        has_search = any(w in t for w in _SEARCH_PATTERNS)
+        has_email = any(w in t for w in _EMAIL_PATTERNS)
+        connector_words = (" and ", " then ", " after that ")
+        has_connector = any(w in t for w in connector_words)
+
+        if has_search and has_email and has_connector:
+            logger.info("[ORCHESTRATOR] fast_path: search+email → two tasks with dependency")
+            # Extract email recipient
+            email_match = re.search(r'(?:email|mail)\s+(?:to\s+)?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', t)
+            recipient = email_match.group(1) if email_match else "the user"
+
+            # Create two tasks with dependency
+            return [
+                Task(
+                    id="t1",
+                    agent_name="web",
+                    instruction=f"Search the web for: '{transcript}'. Extract and format the key information as a clear list.",
+                    can_parallelize=False,
+                    depends_on=[],
+                ),
+                Task(
+                    id="t2",
+                    agent_name="integration",
+                    instruction=f"Send an email to {recipient} with subject 'Search Results' and body containing the search results from the previous task. Use the exact results provided in the context.",
+                    can_parallelize=False,
+                    depends_on=["t1"],
+                ),
+            ]
+
+        # ── Search + Save/Create file workflow ──────────────────────────────────
+        _SAVE_PATTERNS = ("save ", "create file", "write to file", "make file", "put in file")
+        has_save = any(w in t for w in _SAVE_PATTERNS)
+
+        if has_search and has_save and has_connector:
+            logger.info("[ORCHESTRATOR] fast_path: search+save → two tasks with dependency")
+            return [
+                Task(
+                    id="t1",
+                    agent_name="web",
+                    instruction=f"Search the web for: '{transcript}'. Extract and format the key information.",
+                    can_parallelize=False,
+                    depends_on=[],
+                ),
+                Task(
+                    id="t2",
+                    agent_name="dev",
+                    instruction="Create a file with the search results from the previous task. Save it to the desktop with an appropriate filename.",
+                    can_parallelize=False,
+                    depends_on=["t1"],
+                ),
+            ]
 
         return None

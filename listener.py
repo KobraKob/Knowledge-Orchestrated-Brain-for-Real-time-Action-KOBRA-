@@ -99,12 +99,19 @@ class Listener:
 
     # ── Speech capture ─────────────────────────────────────────────────────────
 
-    def capture_speech(self) -> str:
+    def capture_speech(self, speaking_flag=None) -> str:
         """
         Record audio until silence, then return the Whisper transcript.
         Opens a fresh audio stream each call so it never competes with wake word detection.
-        Returns an empty string if nothing captured or STT failed.
+        Returns an empty string if nothing captured, STT failed, or KOBRA is speaking.
+
+        speaking_flag: optional threading.Event — if set, capture is suppressed immediately.
+                       Pass main._kobra_speaking to prevent KOBRA hearing its own voice.
         """
+        # Don't record while KOBRA is speaking — we'd capture TTS bleed
+        if speaking_flag is not None and speaking_flag.is_set():
+            return ""
+
         logger.info("Recording …")
         frames: list[bytes] = []
         silent_chunks = 0
@@ -119,6 +126,11 @@ class Listener:
             blocksize=self._frame_length,
         ) as stream:
             for _ in range(max_chunks):
+                # Mid-recording check: if KOBRA starts speaking, abort immediately
+                if speaking_flag is not None and speaking_flag.is_set():
+                    logger.debug("Speaking guard: aborting capture mid-recording.")
+                    return ""
+
                 raw, _ = stream.read(self._frame_length)
                 chunk = bytes(raw)
                 frames.append(chunk)

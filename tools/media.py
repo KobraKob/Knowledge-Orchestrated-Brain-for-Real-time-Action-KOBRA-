@@ -100,11 +100,49 @@ def control_media(action: str) -> str:
 
 
 def play_youtube(query: str) -> str:
-    """Open YouTube search in browser (for VIDEO watching — not audio streaming)."""
+    """
+    Find the top YouTube video for the query and open it directly in the browser.
+    Uses yt-dlp to resolve the first video URL so the video auto-plays — no
+    manual clicking required. Falls back to the search results page if yt-dlp
+    is unavailable or fails.
+    """
     logger.info("[TOOL] play_youtube: %r", query)
-    url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-    webbrowser.open(url)
-    return f"Opened YouTube for '{query}'."
+
+    try:
+        import yt_dlp  # type: ignore
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "extract_flat": True,   # don't download — just get metadata/URL
+            "skip_download": True,
+        }
+        video_url: str | None = None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            if info and "entries" in info and info["entries"]:
+                entry = info["entries"][0]
+                video_id = entry.get("id") or entry.get("url", "")
+                if video_id and not video_id.startswith("http"):
+                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                elif video_id.startswith("http"):
+                    video_url = video_id
+
+        if video_url:
+            logger.info("[TOOL] play_youtube resolved: %s", video_url)
+            webbrowser.open(video_url)
+            return f"Playing '{query}' on YouTube now, sir."
+
+    except ImportError:
+        logger.warning("[TOOL] play_youtube: yt-dlp not installed, falling back to search page.")
+    except Exception as exc:
+        logger.warning("[TOOL] play_youtube yt-dlp failed (%s), falling back to search page.", exc)
+
+    # Fallback: open YouTube search results — user has to click manually
+    fallback_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+    webbrowser.open(fallback_url)
+    return f"Opened YouTube search for '{query}', sir."
 
 
 def play_on_spotify(query: str) -> str:

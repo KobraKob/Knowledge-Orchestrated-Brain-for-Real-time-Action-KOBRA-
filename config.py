@@ -28,7 +28,7 @@ WHISPER_COMPUTE_TYPE: str = "int8"   # CPU-friendly quantization
 # ── Groq (LLM) ────────────────────────────────────────────────────────────────
 # 70b — high accuracy, used ONLY for Turn 1 tool selection.
 # Free tier: 100k tokens/day — so we use it sparingly.
-GROQ_MODEL_TOOLS: str = "llama-3.3-70b-versatile"
+GROQ_MODEL_TOOLS: str = "llama-3.1-8b-instant"   # 8b: 10x higher daily limit; auto-repair handles hallucinations
 
 # 8b — fast and cheap, 1M tokens/day on free tier.
 # Used for: direct conversational answers, Turn 2 narration, greeting.
@@ -37,11 +37,17 @@ GROQ_MODEL_FAST: str = "llama-3.1-8b-instant"
 GROQ_MAX_TOKENS: int = 512
 GROQ_MAX_TOKENS_NARRATION: int = 180  # Hard cap on Turn-2 spoken narration; forces brevity
 
-# ── TTS (edge-tts) ────────────────────────────────────────────────────────────
-TTS_VOICE: str = "en-GB-RyanNeural"    # British male voice — confident, natural JARVIS feel
-TTS_RATE: str = "+5%"                  # Slightly faster than default; +10% felt rushed
+# ── TTS ───────────────────────────────────────────────────────────────────────
+# Kokoro (local GPU TTS — best quality, runs on RTX 3050)
+USE_KOKORO: bool         = True              # Primary TTS engine
+KOKORO_VOICE: str        = "am_michael"      # US male, warm & natural
+KOKORO_MODEL_DIR: str    = "kobra_kokoro_models"  # Model cache directory
+
+# edge-tts (online fallback — only used if Kokoro fails)
+TTS_VOICE: str = "en-GB-RyanNeural"    # British male fallback voice
+TTS_RATE: str = "+5%"
 AUDIO_TEMP_PATH: str = "temp_audio.mp3"
-USE_OFFLINE_TTS: bool = False          # Set True to force pyttsx3 fallback
+USE_OFFLINE_TTS: bool = False          # Set True to force pyttsx3 last-resort
 
 # ── Memory (SQLite) ───────────────────────────────────────────────────────────
 DB_PATH: str = "kobra_memory.db"
@@ -164,6 +170,27 @@ MCP_SERVERS: list[dict] = [
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = "INFO"
 LOG_FILE: str = "kobra.log"
+
+# ── Memory Router ─────────────────────────────────────────────────────────────
+MEMORY_TOKEN_BUDGET          = 800   # max tokens injected per query
+MEMORY_CACHE_TTL             = 60    # seconds to cache query results
+
+# ── Episode management ────────────────────────────────────────────────────────
+EPISODE_SUMMARIZE_AFTER_DAYS = 7     # summarise episodes older than N days
+EPISODE_DELETE_AFTER_DAYS    = 30    # hard-delete episodes older than N days
+
+# ── Morning briefing ──────────────────────────────────────────────────────────
+BRIEFING_SCAN_TIMEOUT        = 15    # seconds to wait for each live scanner
+BRIEFING_MAX_CALENDAR_EVENTS = 4     # calendar events in briefing
+BRIEFING_MAX_EMAILS          = 3     # emails surfaced in briefing
+BRIEFING_MAX_PROJECTS        = 3     # active projects surfaced in briefing
+
+# ── Continuous watcher intervals ──────────────────────────────────────────────
+WATCHER_CALENDAR_INTERVAL    = 60    # seconds between calendar polls
+WATCHER_EMAIL_INTERVAL       = 300   # seconds between email polls
+WATCHER_PROJECT_INTERVAL     = 600   # seconds between project scans
+WATCHER_FLOW_SUPPRESSION_SEC = 180   # suppress interrupts during flow state
+
 
 def setup_logging() -> None:
     """Configure root logger to write to both console and file."""

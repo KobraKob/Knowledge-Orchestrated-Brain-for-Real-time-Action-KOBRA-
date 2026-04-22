@@ -19,10 +19,29 @@ import logging
 import re
 import sys
 import threading
+import time
 import queue as _queue
 
 import config
 from learning import LearningSystem
+
+# v5 memory + proactive systems
+try:
+    from memory.episodic  import EpisodicMemory
+    from memory.semantic  import SemanticMemory
+    from memory.procedural import ProceduralMemory
+    from memory.perceptual import PerceptualMemory
+    from memory.router    import MemoryRouter as TypedMemoryRouter
+    _V5_MEMORY_AVAILABLE = True
+except ImportError:
+    _V5_MEMORY_AVAILABLE = False
+
+try:
+    from proactive.briefing import MorningBriefingEngine, handle_post_briefing_response
+    from proactive.watcher  import ContinuousWatcher
+    _V5_PROACTIVE_AVAILABLE = True
+except ImportError:
+    _V5_PROACTIVE_AVAILABLE = False
 
 config.setup_logging()
 logger = logging.getLogger(__name__)
@@ -53,6 +72,12 @@ _WHISPER_HALLUCINATION_FRAGMENTS = {
     "please subscribe",
     "subtitles by",
 }
+
+
+# ── Speaking guard — prevents listener from processing its own voice ──────────
+# Set to True while speaker.speak() is running. capture_speech() returns "" while
+# this flag is set, dropping the audio without running Whisper.
+_kobra_speaking = threading.Event()
 
 
 def is_meaningful(text: str) -> bool:
@@ -317,9 +342,56 @@ def main() -> None:
                 speaker.play_wake_tone()
                 greeting = brain.generate_greeting()
                 logger.info("Greeting: %s", greeting)
+
+                # Initialize v5 morning briefing engine (if available)
+                _briefing_engine = None
+                _watcher = None
+                if _V5_PROACTIVE_AVAILABLE and _V5_MEMORY_AVAILABLE:
+                    try:
+                        # Build typed memory layers
+                        _episodic_mem = EpisodicMemory(db_path=config.DB_PATH)
+                        _semantic_mem = SemanticMemory(db_path=config.DB_PATH)
+
+                        # Wire semantic memory into brain's memory router
+                        if hasattr(brain, '_memory_router') and hasattr(brain._memory_router, '_semantic'):
+                            brain._memory_router._semantic = _semantic_mem
+                        if hasattr(brain, '_memory_router') and hasattr(brain._memory_router, '_episodic'):
+                            brain._memory_router._episodic = _episodic_mem
+
+                        _briefing_engine = MorningBriefingEngine(
+                            brain=brain,
+                            episodic_memory=_episodic_mem,
+                            semantic_memory=_semantic_mem,
+                        )
+                        logger.info("v5 MorningBriefingEngine initialized.")
+                    except Exception as exc:
+                        logger.warning("v5 briefing engine init failed: %s", exc)
+                        _briefing_engine = None
+
                 post_event("status", state="speaking", label="GREETING")
                 post_event("response", text=greeting)
-                speaker.speak(greeting)
+                _kobra_speaking.set()
+                try:
+                    speaker.speak(greeting)
+                finally:
+                    _kobra_speaking.clear()
+
+                # Phase 2: launch background morning scan (non-blocking)
+                if _briefing_engine is not None:
+                    try:
+                        def _deliver_briefing(briefing_text: str):
+                            if briefing_text and state == "active":
+                                post_event("response", text=briefing_text)
+                                _kobra_speaking.set()
+                                try:
+                                    speaker.speak(briefing_text)
+                                finally:
+                                    _kobra_speaking.clear()
+                        _briefing_engine.run_async(callback=_deliver_briefing, delay=1.0)
+                        logger.info("Morning briefing scan launched in background.")
+                    except Exception as exc:
+                        logger.warning("Briefing async launch failed: %s", exc)
+
                 state = "active"
                 post_event("status", state="listening", label="LISTENING")
                 continue
@@ -334,10 +406,10 @@ def main() -> None:
             except _queue.Empty:
                 pass
 
-            # If no UI command, do voice capture
+            # If no UI command, do voice capture (suppressed while KOBRA is speaking)
             if not transcript:
                 post_event("status", state="listening", label="LISTENING")
-                transcript = listener.capture_speech()
+                transcript = listener.capture_speech(speaking_flag=_kobra_speaking)
 
             if not transcript or not is_meaningful(transcript):
                 continue
@@ -350,15 +422,30 @@ def main() -> None:
             logger.info("User said: %r", transcript)
             post_event("transcript", text=transcript)
 
+            # Track user activity for watcher flow suppression
+            if _watcher is not None:
+                try:
+                    _watcher.record_activity()
+                except Exception:
+                    pass
+
             if is_sleep_command(transcript):
                 post_event("status", state="standby", label="GOING QUIET")
-                speaker.speak("Going quiet, sir. Just say Jarvis when you need me.")
+                _kobra_speaking.set()
+                try:
+                    speaker.speak("Going quiet, sir. Just say Jarvis when you need me.")
+                finally:
+                    _kobra_speaking.clear()
                 state = "sleeping"
                 continue
 
             if is_clear_memory(transcript):
                 memory.clear_conversations()
-                speaker.speak("Conversation history cleared, sir.")
+                _kobra_speaking.set()
+                try:
+                    speaker.speak("Conversation history cleared, sir.")
+                finally:
+                    _kobra_speaking.clear()
                 post_event("tool_call", tool="MEMORY", summary="Conversation history cleared")
                 continue
 
@@ -393,7 +480,21 @@ def main() -> None:
                     idle_checker.update_activity()
                 post_event("status", state="speaking", label="RESPONDING")
                 post_event("response", text=response)
-                speaker.speak(response)
+                _kobra_speaking.set()
+                try:
+                    speaker.speak(response)
+                finally:
+                    _kobra_speaking.clear()
+                    # Brief cooldown so any mic bleed from the last TTS word clears
+                    time.sleep(0.25)
+
+                # Post-briefing preference learning
+                if _V5_PROACTIVE_AVAILABLE and _briefing_engine is not None:
+                    try:
+                        if hasattr(_briefing_engine, '_semantic') and _briefing_engine._semantic:
+                            handle_post_briefing_response(transcript, _briefing_engine._semantic)
+                    except Exception:
+                        pass
 
                 # Detect whether user interrupted during TTS (abort_flag set)
                 was_cut_off = abort_flag.is_set() if abort_flag is not None else False
@@ -404,6 +505,12 @@ def main() -> None:
                         response_len=len(response),
                         was_cut_off=was_cut_off,
                     )
+                except Exception:
+                    pass
+                # Log to execution journal
+                try:
+                    from task_queue import get_journal
+                    get_journal().log_response(_last_transcript, response, was_cut_off)
                 except Exception:
                     pass
 
@@ -419,6 +526,18 @@ def main() -> None:
                 speaker._speak_offline("Shutting down, sir.")
             except Exception:
                 pass
+            # Close session in episodic memory
+            if _V5_MEMORY_AVAILABLE and '_episodic_mem' in dir():
+                try:
+                    _episodic_mem.close_session(summary="Session ended.")
+                except Exception:
+                    pass
+            # Stop watcher
+            if _watcher is not None:
+                try:
+                    _watcher.stop()
+                except Exception:
+                    pass
             break
 
         except Exception as exc:
