@@ -266,6 +266,24 @@ MIT License — use it, modify it, build on it.
 > *"Not a wrapper. Not a demo. A real system built from scratch."*
 
 
+## Orchestrator integration (opt-in)
+
+The verified executor can be selected by the main orchestrator without changing
+the existing queue's default behavior:
+
+```env
+KOBRA_VERIFIED_EXECUTION=1
+KOBRA_VERIFIED_CHECKPOINT=runtime/verified_execution.json
+```
+
+When enabled, non-conversational single-task and multi-task workflows use the
+verified executor. Each agent must implement
+`verify_postcondition(task, result) -> VerificationResult` to independently
+check the actual resulting state. If an agent does not provide this method,
+its task remains UNVERIFIED and dependent tasks are not run. This is intentional:
+a success message alone is not proof that an action happened. Leave the flag
+unset to retain the current TaskQueue/direct-execution behavior.
+
 ## Verified Task Executor (opt-in)
 
 KOBRA includes an opt-in verified execution path in `verified_executor.py`. It runs
