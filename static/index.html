@@ -22,14 +22,14 @@
       --s4: #222630;
 
       /* Venom Green accents — aggressive and toxic */
-      --neon: #ccff00;
-      --neon-2: #99ff00;
-      --neon-dim: rgba(204, 255, 0, 0.08);
-      --neon-glow: rgba(204, 255, 0, 0.3);
+      --neon: #168bff;
+      --neon-2: #55c8ff;
+      --neon-dim: rgba(22, 139, 255, 0.08);
+      --neon-glow: rgba(22, 139, 255, 0.3);
 
       /* Borders */
-      --border: rgba(204, 255, 0, 0.15);
-      --border-hi: rgba(204, 255, 0, 0.35);
+      --border: rgba(22, 139, 255, 0.15);
+      --border-hi: rgba(22, 139, 255, 0.35);
 
       /* Typography */
       --tx: #f4f7fa;
@@ -680,6 +680,22 @@
       z-index: 2;
     }
 
+    #kobra-avatar {
+      position: relative;
+      z-index: 2;
+      width: 148px;
+      height: 148px;
+      object-fit: contain;
+      border-radius: 50%;
+      filter: drop-shadow(0 0 16px rgba(22, 139, 255, .28));
+      animation: avatar-float 4s ease-in-out infinite;
+    }
+
+    @keyframes avatar-float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-5px); }
+    }
+
     .viz-lbl {
       font-size: 12px;
       font-weight: 800;
@@ -1171,7 +1187,8 @@
           <div class="viz-wrap">
             <div class="viz-outer"></div>
             <div class="viz-spin"></div>
-            <canvas id="viz-cv" width="160" height="160"></canvas>
+            <img id="kobra-avatar" src="/static/kobra-avatar.svg" alt="KOBRA, your playful AI assistant">
+            <canvas id="viz-cv" width="160" height="160" aria-hidden="true" style="display:none"></canvas>
           </div>
           <div class="viz-lbl" id="viz-lbl">DORMANT</div>
         </div>
