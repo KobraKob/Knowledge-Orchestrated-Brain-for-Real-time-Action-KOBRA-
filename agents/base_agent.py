@@ -63,6 +63,24 @@ class BaseAgent(ABC):
             duration_seconds=duration,
         )
 
+    def verify_postcondition(self, task: Task, result: TaskResult):
+        """Verify supported outcomes using independent evidence.
+
+        The base implementation intentionally supports only file creation
+        performed by the developer agent. Other capabilities remain unverified
+        until they have capability-specific checks.
+        """
+        from verified_executor import VerificationResult
+
+        if self.AGENT_NAME != "dev":
+            return VerificationResult(
+                verified=False,
+                reason=f"No postcondition verifier is implemented for agent '{self.AGENT_NAME}'.",
+            )
+
+        from file_verifier import verify_file_creation
+        return verify_file_creation(task, result)
+
     # ── Subclass implements this ───────────────────────────────────────────────
 
     @abstractmethod
