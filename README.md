@@ -334,7 +334,7 @@ replaced by this change.
 
 KOBRA can optionally mirror conversation turns and facts into Cognee for associative/graph-based recall. **SQLite remains the source of truth**; existing SQLite writes, summaries, and exact-match recall continue to work. Cognee failures are logged and do not disable SQLite.
 
-The default remains SQLite-only. To experiment, install the optional dependency and configure Cognee's local model/storage providers as required by the [Cognee setup guide](https://docs.cognee.ai/). Then set this in your local `.env`:
+The default remains SQLite-only. Install the base dependencies first, then install the optional sidecar with `pip install -r requirements-cognee.txt`. Configure Cognee's model/storage providers as required by the [Cognee setup guide](https://docs.cognee.ai/). Then set this in your local `.env`:
 
 ```dotenv
 KOBRA_MEMORY_BACKEND=hybrid
