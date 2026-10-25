@@ -418,3 +418,67 @@ class DevAgent(BaseAgent):
             output=output,
             duration_seconds=duration,
         )
+
+
+    def verify_postcondition(self, task, result):
+        """Independently verify file creation; unsupported task types stay unverified."""
+        from pathlib import Path
+        from verified_executor import VerificationResult
+        from file_verifier import verify_file_creation
+        from models import TaskResult
+
+        instruction = (getattr(task, "instruction", "") or "")
+        output = (getattr(result, "output", "") or "")
+        text = instruction + "\n" + output
+        lower = instruction.lower()
+
+        file_intent = any(word in lower for word in (
+            "create a file", "create file", "write a file", "save a file",
+            "generate a file", "make a file", "file called", "file named",
+            "create notes", "write notes",
+        ))
+        if not file_intent:
+            return VerificationResult(
+                False,
+                "DevAgent has no independent postcondition verifier for this task type.",
+            )
+
+        # Prefer the path emitted by the file verifier's supported tool output.
+        verdict = verify_file_creation(task, result)
+        if verdict.verified:
+            return verdict
+
+        # If narration hid the tool result, inspect an explicit path in the task.
+        absolute_paths = re.findall(r'(?i)[A-Z]:\\\\[^\r\n"<>|?*]+', text)
+        candidates = [p.strip().rstrip(".,;:)") for p in absolute_paths]
+        # Desktop filename requests have a deterministic location.
+        filenames = re.findall(
+            r'(?i)([A-Za-z0-9_. -]+\\.(?:txt|md|py|json|csv|html|htm|js|ts|yaml|yml|toml|pdf|docx))\\b',
+            instruction,
+        )
+        for filename in filenames:
+            filename = filename.strip().strip(' "\'')
+            if "desktop" in lower or not candidates:
+                candidates.append(os.path.join(self._DESKTOP, filename))
+            candidates.append(filename)
+
+        seen = set()
+        for candidate in candidates:
+            candidate = os.path.expandvars(os.path.expanduser(candidate))
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            proxy = TaskResult(
+                task_id=task.id,
+                agent_name=task.agent_name,
+                success=bool(getattr(result, "success", False)),
+                output=f"File created: {candidate}",
+            )
+            verdict = verify_file_creation(task, proxy)
+            if verdict.verified:
+                return verdict
+
+        return VerificationResult(
+            False,
+            "File creation was not independently verified. " + verdict.reason,
+        )
