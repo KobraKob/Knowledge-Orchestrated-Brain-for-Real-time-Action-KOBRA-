@@ -328,3 +328,20 @@ python -m unittest discover -s tests -v
 
 The module is intentionally opt-in; the existing `TaskQueue` entry point is not
 replaced by this change.
+
+
+## Experimental Cognee memory (SQLite rollback preserved)
+
+KOBRA can optionally mirror conversation turns and facts into Cognee for associative/graph-based recall. **SQLite remains the source of truth**; existing SQLite writes, summaries, and exact-match recall continue to work. Cognee failures are logged and do not disable SQLite.
+
+The default remains SQLite-only. To experiment, install the optional dependency and configure Cognee's local model/storage providers as required by the [Cognee setup guide](https://docs.cognee.ai/). Then set this in your local `.env`:
+
+```dotenv
+KOBRA_MEMORY_BACKEND=hybrid
+COGNEE_DATASET=kobra_memory
+COGNEE_TOP_K=5
+```
+
+Restart KOBRA. To roll back immediately, set `KOBRA_MEMORY_BACKEND=sqlite` (or remove the setting) and restart. The SQLite database at `kobra_memory.db` is not migrated or deleted.
+
+This is an evaluation integration, not a full backend replacement: Cognee is a best-effort sidecar for semantic/associative recall, while SQLite remains authoritative. Configure Cognee with a local model/provider if you want to avoid paid API services. Validate recall quality, latency, and local resource usage before considering a switch. Cognee's separate index may retain mirrored data after SQLite conversations are cleared; clear its dataset separately if you need to erase that copy.
