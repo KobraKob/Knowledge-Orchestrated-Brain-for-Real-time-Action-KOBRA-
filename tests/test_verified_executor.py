@@ -42,7 +42,7 @@ class VerifiedExecutorTests(unittest.TestCase):
         )
 
         self.assertEqual(report.status, "PARTIAL")
-        self.assertEqual(agent_a.calls, 1)  # same fake agent represents both steps below
+        self.assertEqual(agent_a.calls, 2)  # both steps execute; the second remains unverified
         self.assertEqual([step.status for step in report.steps], ["VERIFIED", "UNVERIFIED"])
         self.assertEqual(calls, ["a", "b"])
 
