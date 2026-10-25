@@ -264,3 +264,49 @@ MIT License — use it, modify it, build on it.
 ---
 
 > *"Not a wrapper. Not a demo. A real system built from scratch."*
+
+
+## Verified Task Executor (opt-in)
+
+KOBRA includes an opt-in verified execution path in `verified_executor.py`. It runs
+`Task` objects through the existing agent interface, respects dependency order,
+records a structured execution report, and allows downstream steps to run only
+after their prerequisites are verified.
+
+**Important:** an agent returning `success=True` is not proof that the requested
+outcome happened. Supply a verifier that checks the real postcondition. For
+example, after a file-writing task, check that the file exists and its contents
+match the requested result. The executor marks a step `UNVERIFIED` if that
+check fails or cannot be established. Retries are opt-in through the verifier's
+`retryable=True` result to avoid accidentally repeating side effects.
+
+Minimal integration example:
+
+```python
+from models import Task
+from verified_executor import VerificationResult, VerifiedTaskExecutor
+
+def verify(task, result):
+    # Replace with a task-specific check of the actual resulting state.
+    return VerificationResult(
+        verified=result.success and "Error:" not in (result.output or ""),
+        reason="Agent result accepted; use a real postcondition check in production.",
+    )
+
+executor = VerifiedTaskExecutor(verifier=verify, checkpoint_path="runtime/last_execution.json")
+report = executor.execute(
+    objective="Complete the requested workflow",
+    tasks=[Task(id="t1", agent_name="dev", instruction="Create the requested file")],
+    agents=agent_registry,
+)
+print(report.to_dict())
+```
+
+Run its unit tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The module is intentionally opt-in; the existing `TaskQueue` entry point is not
+replaced by this change.
