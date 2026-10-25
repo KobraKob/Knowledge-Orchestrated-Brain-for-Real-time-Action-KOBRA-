@@ -115,9 +115,14 @@ class Listener:
         logger.info("Recording …")
         frames: list[bytes] = []
         silent_chunks = 0
+        speech_chunks = 0
+        chunks_without_speech = 0
         max_chunks = int(
             config.MAX_RECORD_SECONDS * self._sample_rate / self._frame_length
         )
+        # Don't terminate during the short pause before a user starts speaking.
+        pre_speech_timeout_chunks = int(3.0 * self._sample_rate / self._frame_length)
+        min_speech_chunks = max(1, int(0.12 * self._sample_rate / self._frame_length))
 
         with sd.RawInputStream(
             samplerate=self._sample_rate,
@@ -126,7 +131,6 @@ class Listener:
             blocksize=self._frame_length,
         ) as stream:
             for _ in range(max_chunks):
-                # Mid-recording check: if KOBRA starts speaking, abort immediately
                 if speaking_flag is not None and speaking_flag.is_set():
                     logger.debug("Speaking guard: aborting capture mid-recording.")
                     return ""
@@ -135,15 +139,26 @@ class Listener:
                 chunk = bytes(raw)
                 frames.append(chunk)
 
-                if self._rms(chunk) < config.SILENCE_THRESHOLD:
-                    silent_chunks += 1
-                else:
+                if self._rms(chunk) >= config.SILENCE_THRESHOLD:
+                    speech_chunks += 1
+                    chunks_without_speech = 0
                     silent_chunks = 0
+                else:
+                    chunks_without_speech += 1
+                    if speech_chunks >= min_speech_chunks:
+                        silent_chunks += 1
 
-                if silent_chunks >= config.SILENCE_CHUNKS:
+                # A quiet room should not trigger an unnecessary 20-second recording.
+                if speech_chunks == 0 and chunks_without_speech >= pre_speech_timeout_chunks:
+                    logger.info("No speech detected within 3 seconds; returning to standby.")
+                    return ""
+
+                # Only stop after speech was actually detected, followed by silence.
+                if speech_chunks >= min_speech_chunks and silent_chunks >= config.SILENCE_CHUNKS:
                     break
 
-        if not frames:
+        if speech_chunks < min_speech_chunks:
+            logger.info("No usable speech captured.")
             return ""
 
         return self._transcribe(frames)
