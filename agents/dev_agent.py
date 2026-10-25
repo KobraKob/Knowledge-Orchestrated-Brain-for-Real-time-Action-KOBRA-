@@ -422,7 +422,6 @@ class DevAgent(BaseAgent):
 
     def verify_postcondition(self, task, result):
         """Independently verify file creation; unsupported task types stay unverified."""
-        from pathlib import Path
         from verified_executor import VerificationResult
         from file_verifier import verify_file_creation
         from models import TaskResult
@@ -449,11 +448,11 @@ class DevAgent(BaseAgent):
             return verdict
 
         # If narration hid the tool result, inspect an explicit path in the task.
-        absolute_paths = re.findall(r'(?i)[A-Z]:\\\\[^\r\n"<>|?*]+', text)
+        absolute_paths = re.findall(r'(?i)[A-Z]:\\[^\r\n"<>|?*]+', text)
         candidates = [p.strip().rstrip(".,;:)") for p in absolute_paths]
         # Desktop filename requests have a deterministic location.
         filenames = re.findall(
-            r'(?i)([A-Za-z0-9_. -]+\\.(?:txt|md|py|json|csv|html|htm|js|ts|yaml|yml|toml|pdf|docx))\\b',
+            r'(?i)([A-Za-z0-9_. -]+\.(?:txt|md|py|json|csv|html|htm|js|ts|yaml|yml|toml|pdf|docx))\b',
             instruction,
         )
         for filename in filenames:
