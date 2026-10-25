@@ -435,6 +435,9 @@ class DevAgent(BaseAgent):
             "create a file", "create file", "write a file", "save a file",
             "generate a file", "make a file", "file called", "file named",
             "create notes", "write notes",
+        )) or bool(re.search(
+            r"\\b(?:create|write|save|generate|make)\\b.*\\b[\\w.-]+\\.(?:txt|md|py|json|csv|html|htm|js|ts|yaml|yml|toml|pdf|docx)\\b",
+            lower,
         ))
         if not file_intent:
             return VerificationResult(
@@ -448,7 +451,10 @@ class DevAgent(BaseAgent):
             return verdict
 
         # If narration hid the tool result, inspect an explicit path in the task.
-        absolute_paths = re.findall(r'(?i)[A-Z]:\\[^\r\n"<>|?*]+', text)
+        absolute_paths = re.findall(
+            r'(?i)\\b[A-Z]:\\\\[^"\\r\\n<>|?*]*?\\.(?:txt|md|py|json|csv|html|htm|js|ts|yaml|yml|toml|pdf|docx)\\b',
+            text,
+        )
         candidates = [p.strip().rstrip(".,;:)") for p in absolute_paths]
         # Desktop filename requests have a deterministic location.
         filenames = re.findall(
