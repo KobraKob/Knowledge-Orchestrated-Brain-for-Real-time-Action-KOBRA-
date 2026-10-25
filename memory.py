@@ -20,6 +20,7 @@ from groq import Groq
 
 import config
 from conversation_memory import ConversationSummaryBuffer
+from cognee_memory import CogneeMemory
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,11 @@ class Memory:
         _groq = Groq(api_key=config.GROQ_API_KEY)
         self._csb = ConversationSummaryBuffer(self._conn, _groq)
 
-        logger.info("Memory initialised — DB: %s", config.DB_PATH)
+        self._cognee = CogneeMemory() if config.KOBRA_MEMORY_BACKEND == "hybrid" else None
+        if config.KOBRA_MEMORY_BACKEND not in {"sqlite", "hybrid"}:
+            logger.warning("Unknown KOBRA_MEMORY_BACKEND=%r; using SQLite only.", config.KOBRA_MEMORY_BACKEND)
+            self._cognee = None
+        logger.info("Memory initialised — DB: %s; backend: %s", config.DB_PATH, "hybrid (SQLite + Cognee sidecar)" if self._cognee else "sqlite")
 
     # ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -68,6 +73,8 @@ class Memory:
         need to be compacted — completely transparent to the caller.
         """
         self._csb.add_turn(role, content)
+        if self._cognee is not None:
+            self._cognee.remember(f"{role}: {content}", kind="conversation", source_id=f"conversation:{role}")
         # Summarise asynchronously — fire and forget within the same call.
         # In practice this is fast (<1s) and only triggers every ~12 turns.
         self._csb.maybe_summarise()
@@ -87,6 +94,8 @@ class Memory:
                 """,
                 (key, value),
             )
+        if self._cognee is not None:
+            self._cognee.remember(f"{key}: {value}", kind="fact", source_id=f"fact:{key}")
         logger.info("Fact saved — %s: %s", key, value)
 
     # ── Conversation reads ─────────────────────────────────────────────────────
@@ -135,6 +144,8 @@ class Memory:
         for row in cur.fetchall():
             results.append({**dict(row), "source": "fact"})
 
+        if self._cognee is not None:
+            results.extend(self._cognee.recall(query))
         return results
 
     # ── Maintenance ────────────────────────────────────────────────────────────

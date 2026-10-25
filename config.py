@@ -49,9 +49,13 @@ TTS_RATE: str = "+5%"
 AUDIO_TEMP_PATH: str = "temp_audio.mp3"
 USE_OFFLINE_TTS: bool = False          # Set True to force pyttsx3 last-resort
 
-# ── Memory (SQLite) ───────────────────────────────────────────────────────────
+# ── Memory (SQLite + optional Cognee sidecar) ─────────────────────────────────
 DB_PATH: str = "kobra_memory.db"
 MEMORY_INJECT_LIMIT: int = 6         # Max recent turns injected per Groq call (10 was bloating tool prompts)
+# Keep SQLite as the source of truth. Set to "hybrid" only after starting/configuring Cognee.
+KOBRA_MEMORY_BACKEND: str = os.getenv("KOBRA_MEMORY_BACKEND", "sqlite").strip().lower()
+COGNEE_DATASET: str = os.getenv("COGNEE_DATASET", "kobra_memory")
+COGNEE_TOP_K: int = int(os.getenv("COGNEE_TOP_K", "5"))
 
 # ── Audio / Silence Detection ─────────────────────────────────────────────────
 SAMPLE_RATE: int = 16000             # Hz — required by Porcupine and Whisper
