@@ -60,5 +60,3 @@ tqdm>=4.66.0              # progress bars during initial indexing
 # ── Proactive Engine (v4) ─────────────────────────────────────────────────────
 croniter>=2.0.0           # cron-style task scheduling
 
-# Optional associative memory backend; only needed for KOBRA_MEMORY_BACKEND=hybrid.
-cognee>=0.5.0
