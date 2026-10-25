@@ -14,6 +14,7 @@ Fast paths:
 
 import json
 import logging
+import os
 import re
 import threading
 
@@ -27,6 +28,7 @@ from task_queue import TaskQueue
 from synthesizer import Synthesizer
 from planner import NeuralPlanner
 from routing_memory import RoutingMemory
+from verified_executor import VerificationResult, VerifiedTaskExecutor
 
 try:
     from guardrails import Guardrails
@@ -191,6 +193,13 @@ class Orchestrator:
         )
         self._router = TaskRouter()
         self._queue = TaskQueue()
+        # Opt-in until agents expose independent postcondition verifiers.
+        self._verified_executor = None
+        if os.getenv("KOBRA_VERIFIED_EXECUTION", "0").strip().lower() in {"1", "true", "yes"}:
+            self._verified_executor = VerifiedTaskExecutor(
+                verifier=self._verify_task_postcondition,
+                checkpoint_path=os.getenv("KOBRA_VERIFIED_CHECKPOINT", "runtime/verified_execution.json"),
+            )
         self._synthesizer = Synthesizer(brain)
         self._planner = NeuralPlanner()
         self._routing_memory = RoutingMemory()
@@ -296,8 +305,8 @@ class Orchestrator:
                 pass
             return result
 
-        # Fast path B: single non-conversational task (skip queue overhead)
-        if len(tasks) == 1:
+        # Fast path B: preserve direct execution unless verified mode is enabled.
+        if len(tasks) == 1 and self._verified_executor is None:
             agent = self._agents.get(tasks[0].agent_name)
             if agent:
                 result = agent.execute(tasks[0], abort_flag)
@@ -313,8 +322,27 @@ class Orchestrator:
                     pass
                 return self._synthesizer.synthesize(transcript, [result])
 
-        # Standard path: multi-task orchestration
-        results = self._queue.execute(tasks, self._agents, abort_flag)
+        # Verified mode covers both single-task and multi-task action workflows.
+        if self._verified_executor is not None:
+            report = self._verified_executor.execute(enriched, tasks, self._agents, abort_flag)
+            results = [
+                TaskResult(
+                    task_id=step.task_id,
+                    agent_name=step.agent_name,
+                    success=step.status == "VERIFIED",
+                    output=step.output if step.status == "VERIFIED" else
+                        f"{step.status}: {step.error or step.verification_reason or 'Postcondition not verified.'}",
+                    duration_seconds=step.duration_seconds,
+                    was_aborted=step.status == "ABORTED",
+                )
+                for step in report.steps
+            ]
+            logger.info(
+                "[ORCHESTRATOR] Verified execution %s: status=%s, verified=%d/%d",
+                report.execution_id, report.status, report.verified_count, len(report.steps),
+            )
+        else:
+            results = self._queue.execute(tasks, self._agents, abort_flag)
         for result in results:
             outcome = "success" if result.success else "failure"
             self._routing_memory.log_routing(
@@ -327,6 +355,23 @@ class Orchestrator:
             except Exception:
                 pass
         return self._synthesizer.synthesize(transcript, results)
+
+    def _verify_task_postcondition(self, task: Task, result: TaskResult) -> VerificationResult:
+        """Require an agent-specific independent postcondition check."""
+        agent = self._agents.get(task.agent_name)
+        verifier = getattr(agent, "verify_postcondition", None) if agent else None
+        if not callable(verifier):
+            return VerificationResult(
+                verified=False,
+                reason=f"Agent '{task.agent_name}' has no independent postcondition verifier.",
+            )
+        verdict = verifier(task, result)
+        if not isinstance(verdict, VerificationResult):
+            return VerificationResult(
+                verified=False,
+                reason="Agent verifier must return VerificationResult.",
+            )
+        return verdict
 
     # ── Decomposition ──────────────────────────────────────────────────────────
 
