@@ -11,7 +11,7 @@ Kokoro notes:
   - Uses kokoro-onnx with onnxruntime-gpu for RTX acceleration.
   - Model (~87 MB) is downloaded from HuggingFace on first use and
     cached in KOKORO_MODEL_DIR (default: kobra_kokoro_models/).
-  - Voice: am_michael — natural US male, warm and confident.
+  - Voice: af_heart — natural female voice.
   - Sample rate: 24 000 Hz. Played via sounddevice (no ffplay needed).
   - Falls back to edge-tts transparently if model load fails.
 """
@@ -56,7 +56,7 @@ class Speaker:
         self._kokoro_lock = threading.Lock()
         self._kokoro_ready = False
         self._use_kokoro   = getattr(config, "USE_KOKORO", True)
-        self._kokoro_voice = getattr(config, "KOKORO_VOICE", "am_michael")
+        self._kokoro_voice = getattr(config, "KOKORO_VOICE", "af_heart")
 
         # ElevenLabs client
         self._el_client = None
@@ -66,8 +66,9 @@ class Speaker:
         if not self._use_offline and not config.USE_ELEVENLABS:
             self._check_ffplay()
 
-        if self._use_offline:
-            self._init_pyttsx3()
+        # Always initialize the last-resort offline engine. It must exist when
+        # Kokoro and the online Edge voice both fail.
+        self._init_pyttsx3()
 
         # Warm up Kokoro in background so first speak() is fast
         if self._use_kokoro and not self._el_client:
@@ -95,12 +96,27 @@ class Speaker:
         try:
             import pyttsx3
             self._pyttsx3_engine = pyttsx3.init()
-            voices = self._pyttsx3_engine.getProperty("voices")
-            if voices:
+            voices = self._pyttsx3_engine.getProperty("voices") or []
+            # Prefer an installed female Windows/SAPI voice when available.
+            female_voice = next(
+                (
+                    voice for voice in voices
+                    if any(
+                        marker in f"{getattr(voice, 'name', '')} {getattr(voice, 'id', '')}".lower()
+                        for marker in ("aria", "zira", "hazel", "susan", "female", "eva", "jenny")
+                    )
+                ),
+                None,
+            )
+            if female_voice:
+                self._pyttsx3_engine.setProperty("voice", female_voice.id)
+                logger.info("Offline TTS voice selected: %s", female_voice.name)
+            elif voices:
                 self._pyttsx3_engine.setProperty("voice", voices[0].id)
+                logger.warning("No obvious female system voice found; using default voice: %s", voices[0].name)
             self._pyttsx3_engine.setProperty("rate", 175)
-        except ImportError:
-            logger.warning("pyttsx3 not installed — offline TTS unavailable.")
+        except Exception as exc:
+            logger.warning("Could not initialize pyttsx3 offline fallback: %s", exc)
             self._pyttsx3_engine = None
 
     # ── ElevenLabs ─────────────────────────────────────────────────────────────

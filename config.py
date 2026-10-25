@@ -28,11 +28,11 @@ WHISPER_COMPUTE_TYPE: str = "int8"   # CPU-friendly quantization
 # ── Groq (LLM) ────────────────────────────────────────────────────────────────
 # 70b — high accuracy, used ONLY for Turn 1 tool selection.
 # Free tier: 100k tokens/day — so we use it sparingly.
-GROQ_MODEL_TOOLS: str = "llama-3.1-8b-instant"   # 8b: 10x higher daily limit; auto-repair handles hallucinations
+GROQ_MODEL_TOOLS: str = "openai/gpt-oss-20b"   # 8b: 10x higher daily limit; auto-repair handles hallucinations
 
 # 8b — fast and cheap, 1M tokens/day on free tier.
 # Used for: direct conversational answers, Turn 2 narration, greeting.
-GROQ_MODEL_FAST: str = "llama-3.1-8b-instant"
+GROQ_MODEL_FAST: str = "openai/gpt-oss-20b"
 
 GROQ_MAX_TOKENS: int = 512
 GROQ_MAX_TOKENS_NARRATION: int = 180  # Hard cap on Turn-2 spoken narration; forces brevity
@@ -40,11 +40,11 @@ GROQ_MAX_TOKENS_NARRATION: int = 180  # Hard cap on Turn-2 spoken narration; for
 # ── TTS ───────────────────────────────────────────────────────────────────────
 # Kokoro (local GPU TTS — best quality, runs on RTX 3050)
 USE_KOKORO: bool         = True              # Primary TTS engine
-KOKORO_VOICE: str        = "am_michael"      # US male, warm & natural
+KOKORO_VOICE: str        = "af_heart"      # US male, warm & natural
 KOKORO_MODEL_DIR: str    = "kobra_kokoro_models"  # Model cache directory
 
 # edge-tts (online fallback — only used if Kokoro fails)
-TTS_VOICE: str = "en-GB-RyanNeural"    # British male fallback voice
+TTS_VOICE: str = "en-US-AriaNeural"    # British male fallback voice
 TTS_RATE: str = "+5%"
 AUDIO_TEMP_PATH: str = "temp_audio.mp3"
 USE_OFFLINE_TTS: bool = False          # Set True to force pyttsx3 last-resort
@@ -60,8 +60,8 @@ COGNEE_TOP_K: int = int(os.getenv("COGNEE_TOP_K", "5"))
 # ── Audio / Silence Detection ─────────────────────────────────────────────────
 SAMPLE_RATE: int = 16000             # Hz — required by Porcupine and Whisper
 FRAME_LENGTH: int = 512              # Porcupine frame size (samples)
-SILENCE_THRESHOLD: float = 300.0     # RMS below this = silence
-SILENCE_CHUNKS: int = 35             # Consecutive silent chunks before stop (~1.1s at 16kHz/512)
+SILENCE_THRESHOLD: float = 180.0     # RMS below this = silence
+SILENCE_CHUNKS: int = 45             # Consecutive silent chunks before stop (~1.1s at 16kHz/512)
 MAX_RECORD_SECONDS: int = 20         # Hard cap on recording duration; 15s cut off longer commands
 
 # ── run_command — full access, no whitelist restriction ───────────────────────
